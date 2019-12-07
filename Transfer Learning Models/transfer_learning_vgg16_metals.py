@@ -16,14 +16,6 @@ from keras.callbacks import ModelCheckpoint
 
 BATCH_SIZE=32
 EPOCH=12
-# img_path = 'elephant.jpg'
-# img = image.load_img(img_path, target_size=(224, 224))
-# x = image.img_to_array(img)
-# print (x.shape)
-# x = np.expand_dims(x, axis=0)
-# print (x.shape)
-# x = preprocess_input(x)
-# print('Input image shape:', x.shape)
 
 # Loading the training data
 PATH = os.getcwd()
@@ -49,7 +41,6 @@ for dataset in data_dir_list:
 		img_data_list.append(x)
 
 img_data = np.array(img_data_list)
-#img_data = img_data.astype('float32')
 print (img_data.shape)
 img_data=np.rollaxis(img_data,1,0)
 print (img_data.shape)
@@ -84,7 +75,6 @@ image_input = Input(shape=(224, 224, 3))
 model = VGG16(input_tensor=image_input, include_top=True,weights='imagenet')
 model.summary()
 last_layer = model.get_layer('fc2').output
-#x= Flatten(name='flatten')(last_layer)
 out = Dense(num_classes, activation='softmax', name='output')(last_layer)
 custom_vgg_model = Model(image_input, out)
 custom_vgg_model.summary()
@@ -102,7 +92,6 @@ checkpoint = ModelCheckpoint(filepath, monitor='accuracy', verbose=1, save_best_
 callbacks_list = [checkpoint]
 
 t=time.time()
-#	t = now()
 hist = custom_vgg_model.fit(X_train, y_train, batch_size=BATCH_SIZE,
 							epochs=EPOCH, verbose=1, validation_data=(X_test, y_test),
 							callbacks=callbacks_list)

@@ -1,31 +1,27 @@
-
-import numpy as np
 import os
 import time
+from math import ceil
 from resnet50 import ResNet50
-from keras.preprocessing import image
+from keras.preprocessing.image import ImageDataGenerator
 from keras.layers import GlobalAveragePooling2D, Dense, Dropout,Activation,Flatten
 
-from imagenet_utils import preprocess_input
-from keras.layers import Input
+from imagenet_utils import create_test_train_data, plot_graph
+from keras.layers import Input, normalization
 from keras.models import Model
-from keras.utils import np_utils
-from sklearn.utils import shuffle
-from sklearn.model_selection import train_test_split
 from keras.callbacks import ModelCheckpoint
+import keras.backend as K
+from sklearn.metrics import classification_report, confusion_matrix
+import numpy as np
+import keras
 
-# img_path = 'elephant.jpg'
-# img = image.load_img(img_path, target_size=(224, 224))
-# x = image.img_to_array(img)
-# print (x.shape)
-# x = np.expand_dims(x, axis=0)
-# print (x.shape)
-# x = preprocess_input(x)
-# print('Input image shape:', x.shape)
+# Enable Mixed precision on v100
+os.environ['TF_ENABLE_AUTO_MIXED_PRECISION'] = '1'
 
 # Loading the training data
 BATCH_SIZE=32
-EPOCH=20
+EPOCH=200
+AUGMENT=True
+suffix='aug' if AUGMENT else 'noaug'
 
 PATH = os.getcwd()
 # Define data path
@@ -34,157 +30,206 @@ data_dir_list = os.listdir(data_path)
 
 checkpoint_path=PATH + '/checkpoint'
 
-img_data_list=[]
+labelmap = {
+	'Aluminum' : 4,
+	'Aluminum1' : 4,
+	'SSteel' : 1,
+	'SSteel1' : 1,
+	'Zinc' : 0,
+	'Zinc1' : 0,
+	'Brass' : 3,
+	'Copper' : 2,
+	'Copper1' : 2
+}
 
-for dataset in data_dir_list:
-	img_list=os.listdir(data_path+'/'+ dataset)
-	print ('Loaded the images of dataset-'+'{}\n'.format(dataset))
-	for img in img_list:
-		img_path = data_path + '/'+ dataset + '/'+ img 
-		img = image.load_img(img_path, target_size=(224, 224))
-		x = image.img_to_array(img)
-		x = np.expand_dims(x, axis=0)
-		x = preprocess_input(x)
-		#print('Input image shape:', x.shape)
-		img_data_list.append(x)
+target_classes = list(set(labelmap.values()))
+num_classes = len(target_classes)
 
-img_data = np.array(img_data_list)
-#img_data = img_data.astype('float32')
-print (img_data.shape)
-img_data=np.rollaxis(img_data,1,0)
-print (img_data.shape)
-img_data=img_data[0]
-print (img_data.shape)
+def createImageDataGenerator():
+	datagen = ImageDataGenerator(
+		featurewise_center=False,  # set input mean to 0 over the dataset
+		samplewise_center=False,  # set each sample mean to 0
+		featurewise_std_normalization=False,  # divide inputs by std of the dataset
+		samplewise_std_normalization=False,  # divide each input by its std
+		zca_whitening=False,  # apply ZCA whitening
+		zca_epsilon=1e-06,  # epsilon for ZCA whitening
+		rotation_range=90,  # randomly rotate images in the range (degrees, 0 to 180)
+		# randomly shift images horizontally (fraction of total width)
+		width_shift_range=0.3,
+		# randomly shift images vertically (fraction of total height)
+		height_shift_range=0.3,
+		shear_range=0.2,  # set range for random shear
+		zoom_range=[0.7, 1.5],  # set range for random zoom
+		channel_shift_range=0.,  # set range for random channel shifts
+		# set mode for filling points outside the input boundaries
+		fill_mode='nearest',
+		cval=0.,  # value used for fill_mode = "constant"
+		horizontal_flip=True,  # randomly flip images
+		vertical_flip=True,  # randomly flip images
+		# set rescaling factor (applied before any other transformation)
+		brightness_range=[0.2, 1.0],
+		rescale=None,
+		# set function that will be applied on each input
+		preprocessing_function=None,
+		# image data format, either "channels_first" or "channels_last"
+		data_format="channels_last",
+		# fraction of images reserved for validation (strictly between 0 and 1)
+		validation_split=0.0)
+
+	return datagen
+
+def resnet_model1(X_train, y_train, X_test, y_test, augment):
+	###########################################################################################################################
+	# Custom_resnet_model_1
+	# Training the classifier alone
+	print('----------Training Resnet Model 1 - Only change to output layer----------')
+	print('Inline Image Augmentation Enabled: {}'.format(augment))
+
+	image_input = Input(shape=(224, 224, 3))
+
+	model = ResNet50(input_tensor=image_input, include_top=True, weights='imagenet')
+	model.summary()
+	last_layer = model.get_layer('avg_pool').output
+	x = Flatten(name='flatten')(last_layer)
+	out = Dense(num_classes, activation='softmax', name='output_layer')(x)
+	custom_resnet_model = Model(inputs=image_input, outputs=out)
+	#custom_resnet_model.summary()
+
+	for layer in custom_resnet_model.layers[:-1]:
+		layer.trainable = False
+		if isinstance(layer, normalization.BatchNormalization):
+			layer._per_input_updates = {}
+
+	custom_resnet_model.layers[-1].trainable
+
+	custom_resnet_model.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+	#custom_resnet_model.compile(loss='categorical_crossentropy', optimizer=keras.optimizers.RMSprop(lr=0.0001, decay=1e-6), metrics=['accuracy'])
+
+	# checkpoint
+	filepath = checkpoint_path + "/resnet50-model1-{}.hdf5".format(suffix)
+	checkpoint = ModelCheckpoint(filepath, monitor='val_accuracy', verbose=1, save_best_only=True, mode='max')
+	callbacks_list = [checkpoint]
+
+	t = time.time()
+	K.set_learning_phase(1)
+
+	if not augment:
+
+		hist = custom_resnet_model.fit(X_train, y_train, batch_size=BATCH_SIZE,
+								   epochs=EPOCH, verbose=1, validation_data=(X_test, y_test),
+								   callbacks=callbacks_list)
+	else:
+		datagen = createImageDataGenerator()
+		datagen.fit(X_train)
+
+		#test_data = datagen.flow(X_test, y_test, batch_size=BATCH_SIZE)
+
+		# Fit the model on the batches generated by datagen.flow(). , steps_per_epoch =10 removed
+		hist = custom_resnet_model.fit_generator(
+							datagen.flow(X_train, y_train, batch_size=BATCH_SIZE),
+							epochs=EPOCH,
+							steps_per_epoch=ceil(len(X_train)/BATCH_SIZE),
+							validation_data= (X_test, y_test),
+							validation_steps=ceil(len(X_test)/BATCH_SIZE),
+							callbacks=callbacks_list)
+
+	print('Training time: %s' % (t - time.time()))
+
+	(loss, accuracy) = custom_resnet_model.evaluate(X_test, y_test, batch_size=BATCH_SIZE, verbose=1)
+
+	print("[INFO] loss={:.4f}, accuracy: {:.4f}%".format(loss, accuracy * 100))
+
+	# --- Confusion Matrix
+	conf_matrix(X_test, y_test, custom_resnet_model)
+
+	# --- Plot the graph
+	plot_graph(hist, EPOCH, '{}/resnet_model1_{}'.format(checkpoint_path, suffix))
+	return
+
+def resnet_model2(X_train, y_train, X_test, y_test, augment):
+	###########################################################################################################################
+
+	# Fine tune the resnet 50
+	print('---------Training Resnet Model 2 - Fine tune----------')
+	print('Inline Image Augmentation Enabled: {}'.format(augment))
+
+	model = ResNet50(weights='imagenet', include_top=False)
+	model.summary()
+	last_layer = model.output
+	# add a global spatial average pooling layer
+	x = GlobalMaxPooling2D()(last_layer)
+	# add fully-connected & dropout layers
+	x = Dense(256, activation='relu', name='fc-1')(x)
+	x = Dropout(0.5)(x)
+	x = Dense(128, activation='relu', name='fc-2')(x)
+	x = Dropout(0.5)(x)
+	# a softmax layer for 5 classes
+	out = Dense(num_classes, activation='softmax', name='output_layer')(x)
+
+	# this is the model we will train
+	custom_resnet_model2 = Model(inputs=model.input, outputs=out)
+
+	custom_resnet_model2.summary()
+
+	for layer in custom_resnet_model2.layers[:-6]:
+		layer.trainable = False
+		if isinstance(layer, normalization.BatchNormalization):
+			layer._per_input_updates = {}
+
+	custom_resnet_model2.layers[-1].trainable
+
+	custom_resnet_model2.compile(loss='categorical_crossentropy', optimizer='adam', metrics=['accuracy'])
+
+	filepath = checkpoint_path + "/resnet50-model2-{}.hdf5".format(suffix)
+	checkpoint = ModelCheckpoint(filepath, monitor='val_accuracy', verbose=1, save_best_only=True, mode='max')
+	callbacks_list = [checkpoint]
+
+	t = time.time()
+	K.set_learning_phase(1)
+	if not augment:
+		hist = custom_resnet_model2.fit(X_train, y_train, batch_size=BATCH_SIZE,
+									epochs=EPOCH, verbose=1, validation_data=(X_test, y_test),
+									callbacks=callbacks_list)
+	else:
+		datagen = createImageDataGenerator()
+		datagen.fit(X_train)
+
+		#test_data = datagen.flow(X_test, y_test, batch_size=BATCH_SIZE)
+		# Fit the model on the batches generated by datagen.flow(). , steps_per_epoch =10 removed
+		hist = custom_resnet_model2.fit_generator(
+			datagen.flow(X_train, y_train, batch_size=BATCH_SIZE),
+			epochs=EPOCH,
+			steps_per_epoch=ceil(len(X_train) / BATCH_SIZE),
+			validation_data= (X_test, y_test),
+			validation_steps=ceil(len(X_test) / BATCH_SIZE),
+			callbacks=callbacks_list)
+	print('Training time: %s' % (t - time.time()))
+	(loss, accuracy) = custom_resnet_model2.evaluate(X_test, y_test, batch_size=BATCH_SIZE, verbose=1)
+
+	print("[INFO] loss={:.4f}, accuracy: {:.4f}%".format(loss, accuracy * 100))
+
+	# --- Confusion Matrix
+	conf_matrix(X_test, y_test, custom_resnet_model2)
+
+	# --- Plot the graph
+	plot_graph(hist, EPOCH, '{}/resnet_model2_{}'.format(checkpoint_path, suffix))
 
 
-# Define the number of classes
-num_classes = 3
-num_of_samples = img_data.shape[0]
-labels = np.ones((num_of_samples,),dtype='int64')
 
-labels[0:266]=0
-labels[266:466]=1
-labels[466:591]=2
+def conf_matrix(x_test, y_test, mymodel, type=0):
+	if type == 0:
+		y_pred = mymodel.predict(x_test)
+	else:
+		y_pred = mymodel.predict_generator((x_test, y_test), len(x_test) // BATCH_SIZE + 1)
 
-names = ['Aluminum', 'SSteel', 'Zinc']
+	targets = ['Zinc', 'Steel', 'Copper', 'Brass','Aluminum']
+	print('Confusion Matrix')
+	print(confusion_matrix(y_test.argmax(axis=1), y_pred.argmax(axis=1)))
+	print('Classification Report')
+	print(classification_report(y_test.argmax(axis=1), y_pred.argmax(axis=1),  target_names=targets))
 
-# convert class labels to on-hot encoding
-Y = np_utils.to_categorical(labels, num_classes)
-
-#Shuffle the dataset
-x,y = shuffle(img_data,Y, random_state=2)
 # Split the dataset
-X_train, X_test, y_train, y_test = train_test_split(x, y, test_size=0.2, random_state=2)
+X_train, y_train, X_test, y_test = create_test_train_data(data_dir_list, data_path, labelmap)
 
-###########################################################################################################################
-# Custom_resnet_model_1
-#Training the classifier alone
-image_input = Input(shape=(224, 224, 3))
-
-model = ResNet50(input_tensor=image_input, include_top=True,weights='imagenet')
-model.summary()
-last_layer = model.get_layer('avg_pool').output
-x= Flatten(name='flatten')(last_layer)
-out = Dense(num_classes, activation='softmax', name='output_layer')(x)
-custom_resnet_model = Model(inputs=image_input,outputs= out)
-custom_resnet_model.summary()
-
-for layer in custom_resnet_model.layers[:-1]:
-	layer.trainable = False
-
-custom_resnet_model.layers[-1].trainable
-
-custom_resnet_model.compile(loss='categorical_crossentropy',optimizer='adam',metrics=['accuracy'])
-
-# checkpoint
-filepath = checkpoint_path + "resnet50-weights.hdf5".format()
-checkpoint = ModelCheckpoint(filepath, monitor='accuracy', verbose=1, save_best_only=True, mode='max')
-callbacks_list = [checkpoint]
-
-t=time.time()
-
-hist = custom_resnet_model.fit(X_train, y_train, batch_size=BATCH_SIZE,
-							   epochs=EPOCH, verbose=1, validation_data=(X_test, y_test),
-							   callbacks=callbacks_list)
-print('Training time: %s' % (t - time.time()))
-(loss, accuracy) = custom_resnet_model.evaluate(X_test, y_test, batch_size=10, verbose=1)
-
-print("[INFO] loss={:.4f}, accuracy: {:.4f}%".format(loss,accuracy * 100))
-
-###########################################################################################################################
-
-# Fine tune the resnet 50
-#image_input = Input(shape=(224, 224, 3))
-model = ResNet50(weights='imagenet',include_top=False)
-model.summary()
-last_layer = model.output
-# add a global spatial average pooling layer
-x = GlobalAveragePooling2D()(last_layer)
-# add fully-connected & dropout layers
-x = Dense(512, activation='relu',name='fc-1')(x)
-x = Dropout(0.5)(x)
-x = Dense(256, activation='relu',name='fc-2')(x)
-x = Dropout(0.5)(x)
-# a softmax layer for 4 classes
-out = Dense(num_classes, activation='softmax',name='output_layer')(x)
-
-# this is the model we will train
-custom_resnet_model2 = Model(inputs=model.input, outputs=out)
-
-custom_resnet_model2.summary()
-
-for layer in custom_resnet_model2.layers[:-6]:
-	layer.trainable = False
-
-custom_resnet_model2.layers[-1].trainable
-
-custom_resnet_model2.compile(loss='categorical_crossentropy',optimizer='adam',metrics=['accuracy'])
-
-filepath = checkpoint_path + "resnet50-ft-weights.hdf5".format()
-checkpoint = ModelCheckpoint(filepath, monitor='accuracy', verbose=1, save_best_only=True, mode='max')
-callbacks_list = [checkpoint]
-
-t=time.time()
-
-
-hist = custom_resnet_model2.fit(X_train, y_train, batch_size=BATCH_SIZE,
-								epochs=EPOCH, verbose=1, validation_data=(X_test, y_test),
-								callbacks=callbacks_list)
-print('Training time: %s' % (t - time.time()))
-(loss, accuracy) = custom_resnet_model2.evaluate(X_test, y_test, batch_size=10, verbose=1)
-
-print("[INFO] loss={:.4f}, accuracy: {:.4f}%".format(loss,accuracy * 100))
-
-############################################################################################
-import matplotlib.pyplot as plt
-# visualizing losses and accuracy
-train_loss=hist.history['loss']
-val_loss=hist.history['val_loss']
-train_acc=hist.history['accuracy']
-val_acc=hist.history['val_accuracy']
-xc=range(EPOCH)
-
-plt.figure(1,figsize=(7,5))
-plt.plot(xc,train_loss)
-plt.plot(xc,val_loss)
-plt.xlabel('num of Epochs')
-plt.ylabel('loss')
-plt.title('train_loss vs val_loss')
-plt.grid(True)
-plt.legend(['train','val'])
-#print plt.style.available # use bmh, classic,ggplot for big pictures
-plt.style.use(['classic'])
-
-plt.figure(2,figsize=(7,5))
-plt.plot(xc,train_acc)
-plt.plot(xc,val_acc)
-plt.xlabel('num of Epochs')
-plt.ylabel('accuracy')
-plt.title('train_acc vs val_acc')
-plt.grid(True)
-plt.legend(['train','val'],loc=4)
-#print plt.style.available # use bmh, classic,ggplot for big pictures
-plt.style.use(['classic'])
-
-plt.show()
-plt.savefig('Graphs_vgg_metals.png')
+resnet_model1(X_train, y_train, X_test, y_test, AUGMENT)
+resnet_model2(X_train, y_train, X_test, y_test, AUGMENT)
