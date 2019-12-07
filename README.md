@@ -1,4 +1,10 @@
-# w251_Final_Project
+# W251 Final Project
+
+- Chitra S. Agastya
+- Bradley Nott
+- Marcus A. Streips
+- Stanley Ye
+
 This is the code repository to support the final project deliverable for w251 as part of the UC, Berkeley MIDS program
 
 
