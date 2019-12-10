@@ -1,3 +1,7 @@
+##
+##  Reference: https://github.com/anujshah1003/Transfer-Learning-in-keras---custom-data
+##
+
 import numpy as np
 import json
 
