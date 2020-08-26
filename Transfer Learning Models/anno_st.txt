@@ -1,0 +1,5 @@
+folder, label
+ZN, 1
+SS, 1
+CU, 3
+AL, 4
